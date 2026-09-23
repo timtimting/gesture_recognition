@@ -7,6 +7,7 @@ from pathlib import Path
 
 os.environ.pop("QT_PLUGIN_PATH", None)
 os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
+os.environ.setdefault("QT_LOGGING_RULES", "*.warning=false")
 
 import cv2
 import mediapipe as mp
@@ -29,6 +30,7 @@ MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
     "hand_landmarker/float16/1/hand_landmarker.task"
 )
+WINDOW_NAME = "Gesture Recognition"
 HAND_CONNECTIONS = (
     (0, 1),
     (1, 2),
@@ -148,6 +150,43 @@ def draw_result(frame, landmarks, gesture_name, handedness):
     cv2.putText(frame, label, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
 
+def pixel_point(landmark, width, height):
+    x = max(0, min(width - 1, int(landmark.x * width)))
+    y = max(0, min(height - 1, int(landmark.y * height)))
+    return (x, y)
+
+
+def two_hand_polygon(frame, hand_landmarks):
+    if len(hand_landmarks) < 2:
+        return None
+
+    height, width = frame.shape[:2]
+    ordered_hands = sorted(hand_landmarks, key=lambda landmarks: landmarks[0].x)
+    left_hand, right_hand = ordered_hands[:2]
+    return np.array(
+        [
+            pixel_point(left_hand[4], width, height),
+            pixel_point(right_hand[4], width, height),
+            pixel_point(right_hand[8], width, height),
+            pixel_point(left_hand[8], width, height),
+        ],
+        dtype=np.int32,
+    )
+
+
+def draw_two_hand_connections(frame, hand_landmarks):
+    polygon = two_hand_polygon(frame, hand_landmarks)
+    if polygon is None:
+        return
+
+    thumb_left, thumb_right, index_right, index_left = polygon
+    cv2.line(frame, tuple(thumb_left), tuple(thumb_right), (255, 0, 255), 3)
+    cv2.line(frame, tuple(index_left), tuple(index_right), (255, 255, 0), 3)
+    cv2.polylines(frame, [polygon], True, (0, 255, 255), 2)
+    for point in polygon:
+        cv2.circle(frame, tuple(point), 7, (0, 255, 255), -1)
+
+
 def blur_background(frame, hand_landmarks):
     height, width = frame.shape[:2]
     small_width = max(1, width // 3)
@@ -166,6 +205,10 @@ def blur_background(frame, hand_landmarks):
         )
         hull = cv2.convexHull(points)
         cv2.fillConvexPoly(hand_mask, hull, 255)
+
+    clear_polygon = two_hand_polygon(frame, hand_landmarks)
+    if clear_polygon is not None:
+        cv2.fillPoly(hand_mask, [clear_polygon], 255)
 
     dilation_size = max(15, int(min(height, width) * 0.04))
     dilation_kernel = cv2.getStructuringElement(
@@ -246,6 +289,7 @@ def main():
                             handedness = results.handedness[index][0].category_name or "手"
                         gesture = classify_gesture(landmarks, handedness)
                         draw_result(frame, landmarks, gesture, handedness)
+                    draw_two_hand_connections(frame, results.hand_landmarks)
 
                 current_time = time.perf_counter()
                 elapsed = current_time - last_time
@@ -261,10 +305,16 @@ def main():
                     (255, 255, 255),
                     2,
                 )
-                cv2.imshow("Gesture Recognition", frame)
+                cv2.imshow(WINDOW_NAME, frame)
 
                 key = cv2.waitKey(1) & 0xFF
-                if key in (ord("q"), 27):
+                try:
+                    window_visible = cv2.getWindowProperty(
+                        WINDOW_NAME, cv2.WND_PROP_VISIBLE
+                    )
+                except cv2.error:
+                    window_visible = 0
+                if key in (ord("q"), 27) or window_visible < 1:
                     break
     finally:
         capture.release()
