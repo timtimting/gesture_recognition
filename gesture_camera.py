@@ -32,29 +32,6 @@ MODEL_URL = (
     "hand_landmarker/float16/1/hand_landmarker.task"
 )
 WINDOW_NAME = "Gesture Recognition"
-HAND_CONNECTIONS = (
-    (0, 1),
-    (1, 2),
-    (2, 3),
-    (3, 4),
-    (0, 5),
-    (5, 6),
-    (6, 7),
-    (7, 8),
-    (5, 9),
-    (9, 10),
-    (10, 11),
-    (11, 12),
-    (9, 13),
-    (13, 14),
-    (14, 15),
-    (15, 16),
-    (13, 17),
-    (0, 17),
-    (17, 18),
-    (18, 19),
-    (19, 20),
-)
 
 
 def parse_args():
@@ -137,16 +114,8 @@ def classify_gesture(landmarks, handedness):
 
 def draw_result(frame, landmarks, gesture_name, handedness):
     height, width = frame.shape[:2]
-    points = []
-    for landmark in landmarks:
-        point = (int(landmark.x * width), int(landmark.y * height))
-        points.append(point)
-        cv2.circle(frame, point, 4, (0, 140, 255), -1)
-    for start, end in HAND_CONNECTIONS:
-        cv2.line(frame, points[start], points[end], (0, 220, 0), 2)
-
-    x = max(10, points[0][0] - 20)
-    y = max(35, points[0][1] - 20)
+    x = max(10, int(landmarks[0].x * width) - 20)
+    y = max(35, int(landmarks[0].y * height) - 20)
     label = f"{handedness}: {GESTURE_NAMES[gesture_name]}"
     cv2.putText(frame, label, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
 
