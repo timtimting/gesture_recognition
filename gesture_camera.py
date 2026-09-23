@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import sys
 import time
@@ -156,13 +157,39 @@ def pixel_point(landmark, width, height):
     return (x, y)
 
 
-def two_hand_polygon(frame, hand_landmarks):
-    if len(hand_landmarks) < 2:
+def target_fingers_extended(landmarks, _handedness):
+    thumb_tip_distance = math.dist(
+        (landmarks[4].x, landmarks[4].y),
+        (landmarks[0].x, landmarks[0].y),
+    )
+    thumb_joint_distance = math.dist(
+        (landmarks[3].x, landmarks[3].y),
+        (landmarks[0].x, landmarks[0].y),
+    )
+    thumb_extended = thumb_tip_distance > thumb_joint_distance * 1.08
+
+    index_tip_distance = math.dist(
+        (landmarks[8].x, landmarks[8].y),
+        (landmarks[0].x, landmarks[0].y),
+    )
+    index_joint_distance = math.dist(
+        (landmarks[6].x, landmarks[6].y),
+        (landmarks[0].x, landmarks[0].y),
+    )
+    index_extended = index_tip_distance > index_joint_distance * 1.08
+    return thumb_extended and index_extended
+
+
+def two_hand_polygon(frame, hands):
+    if len(hands) < 2 or not all(
+        target_fingers_extended(landmarks, handedness)
+        for landmarks, handedness in hands[:2]
+    ):
         return None
 
     height, width = frame.shape[:2]
-    ordered_hands = sorted(hand_landmarks, key=lambda landmarks: landmarks[0].x)
-    left_hand, right_hand = ordered_hands[:2]
+    ordered_hands = sorted(hands[:2], key=lambda hand: hand[0][0].x)
+    left_hand, right_hand = ordered_hands[0][0], ordered_hands[1][0]
     return np.array(
         [
             pixel_point(left_hand[4], width, height),
@@ -174,8 +201,8 @@ def two_hand_polygon(frame, hand_landmarks):
     )
 
 
-def draw_two_hand_connections(frame, hand_landmarks):
-    polygon = two_hand_polygon(frame, hand_landmarks)
+def draw_two_hand_connections(frame, hands):
+    polygon = two_hand_polygon(frame, hands)
     if polygon is None:
         return
 
@@ -187,18 +214,18 @@ def draw_two_hand_connections(frame, hand_landmarks):
         cv2.circle(frame, tuple(point), 7, (0, 255, 255), -1)
 
 
-def blur_background(frame, hand_landmarks):
+def blur_background(frame, hands):
     height, width = frame.shape[:2]
     small_width = max(1, width // 3)
     small_height = max(1, height // 3)
     small_frame = cv2.resize(frame, (small_width, small_height))
     small_blurred = cv2.GaussianBlur(small_frame, (0, 0), sigmaX=6, sigmaY=6)
     blurred = cv2.resize(small_blurred, (width, height), interpolation=cv2.INTER_LINEAR)
-    if not hand_landmarks:
+    if not hands:
         return blurred
 
     hand_mask = np.zeros((height, width), dtype=np.uint8)
-    for landmarks in hand_landmarks:
+    for landmarks, _ in hands:
         points = np.array(
             [(int(landmark.x * width), int(landmark.y * height)) for landmark in landmarks],
             dtype=np.int32,
@@ -206,7 +233,7 @@ def blur_background(frame, hand_landmarks):
         hull = cv2.convexHull(points)
         cv2.fillConvexPoly(hand_mask, hull, 255)
 
-    clear_polygon = two_hand_polygon(frame, hand_landmarks)
+    clear_polygon = two_hand_polygon(frame, hands)
     if clear_polygon is not None:
         cv2.fillPoly(hand_mask, [clear_polygon], 255)
 
@@ -279,17 +306,21 @@ def main():
                 results = hand_landmarker.detect_for_video(mp_image, timestamp_ms)
                 timestamp_ms += 1
 
-                if not args.no_blur:
-                    frame = blur_background(frame, results.hand_landmarks)
+                hands = []
+                for index, landmarks in enumerate(results.hand_landmarks):
+                    handedness = "手"
+                    if index < len(results.handedness):
+                        handedness = results.handedness[index][0].category_name or "手"
+                    hands.append((landmarks, handedness))
 
-                if results.hand_landmarks:
-                    for index, landmarks in enumerate(results.hand_landmarks):
-                        handedness = "手"
-                        if index < len(results.handedness):
-                            handedness = results.handedness[index][0].category_name or "手"
+                if not args.no_blur:
+                    frame = blur_background(frame, hands)
+
+                if hands:
+                    for landmarks, handedness in hands:
                         gesture = classify_gesture(landmarks, handedness)
                         draw_result(frame, landmarks, gesture, handedness)
-                    draw_two_hand_connections(frame, results.hand_landmarks)
+                    draw_two_hand_connections(frame, hands)
 
                 current_time = time.perf_counter()
                 elapsed = current_time - last_time
