@@ -26,6 +26,15 @@ GESTURE_NAMES = {
     "thumbs_down": "thumbs down",
     "unknown": "unknown",
 }
+VISUAL_MODES = ("original", "anime", "pixel", "sketch", "neon", "retro")
+VISUAL_MODE_LABELS = {
+    "original": "Original",
+    "anime": "Anime",
+    "pixel": "Pixel",
+    "sketch": "Sketch",
+    "neon": "Neon",
+    "retro": "Retro",
+}
 
 MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
@@ -48,6 +57,12 @@ def parse_args():
         "--no-blur",
         action="store_true",
         help="关闭背景虚化",
+    )
+    parser.add_argument(
+        "--visual-mode",
+        choices=("auto",) + VISUAL_MODES,
+        default="auto",
+        help="中间框选区域的画面效果，默认按指尖窗口轮换",
     )
     return parser.parse_args()
 
@@ -217,6 +232,56 @@ def blur_background(frame, hands):
     return (frame * alpha + blurred * (1 - alpha)).astype(np.uint8)
 
 
+def create_visual_effect(frame, mode):
+    if mode == "anime":
+        smooth = cv2.bilateralFilter(frame, 5, 80, 80)
+        gray = cv2.cvtColor(smooth, cv2.COLOR_BGR2GRAY)
+        edges = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 9, 2
+        )
+        return cv2.bitwise_and(smooth, smooth, mask=edges)
+    if mode == "pixel":
+        height, width = frame.shape[:2]
+        pixel_width = max(1, width // 16)
+        pixel_height = max(1, height // 16)
+        small = cv2.resize(frame, (pixel_width, pixel_height), interpolation=cv2.INTER_LINEAR)
+        return cv2.resize(small, (width, height), interpolation=cv2.INTER_NEAREST)
+    if mode == "sketch":
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        inverted = 255 - gray
+        blurred = cv2.GaussianBlur(inverted, (0, 0), sigmaX=12, sigmaY=12)
+        sketch = cv2.divide(gray, 255 - blurred, scale=256)
+        return cv2.cvtColor(sketch, cv2.COLOR_GRAY2BGR)
+    if mode == "neon":
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 80, 160)
+        glow = np.zeros_like(frame)
+        glow[:, :, 0] = edges
+        glow[:, :, 1] = edges // 3
+        glow[:, :, 2] = edges
+        darkened = cv2.convertScaleAbs(frame, alpha=0.35, beta=-20)
+        return cv2.addWeighted(darkened, 0.6, glow, 1.4, 0)
+    if mode == "retro":
+        sepia_matrix = np.array(
+            [[0.272, 0.534, 0.131], [0.349, 0.686, 0.168], [0.393, 0.769, 0.189]],
+            dtype=np.float32,
+        )
+        return np.clip(cv2.transform(frame, sepia_matrix), 0, 255).astype(np.uint8)
+    return frame
+
+
+def apply_visual_effect(frame, polygon, mode):
+    if polygon is None or mode == "original":
+        return frame
+
+    effect_frame = create_visual_effect(frame, mode)
+    mask = np.zeros(frame.shape[:2], dtype=np.uint8)
+    cv2.fillPoly(mask, [polygon], 255)
+    result = frame.copy()
+    result[mask == 255] = effect_frame[mask == 255]
+    return result
+
+
 def open_camera(camera_index, width, height):
     backend = cv2.CAP_V4L2 if sys.platform.startswith("linux") else cv2.CAP_ANY
     capture = cv2.VideoCapture(camera_index, backend)
@@ -245,6 +310,13 @@ def main():
     fps = 0.0
     timestamp_ms = 0
     black_frame_reported = False
+    automatic_mode = args.visual_mode == "auto"
+    current_mode_index = VISUAL_MODES.index(
+        "anime" if automatic_mode else args.visual_mode
+    )
+    next_mode_index = current_mode_index
+    window_was_active = False
+    print(f"当前画面效果: {VISUAL_MODE_LABELS[VISUAL_MODES[current_mode_index]]}")
     options = vision.HandLandmarkerOptions(
         base_options=mp_python.BaseOptions(model_asset_path=str(model_path)),
         running_mode=vision.RunningMode.VIDEO,
@@ -282,6 +354,19 @@ def main():
                         handedness = results.handedness[index][0].category_name or "手"
                     hands.append((landmarks, handedness))
 
+                clear_polygon = two_hand_polygon(frame, hands)
+                window_is_active = clear_polygon is not None
+                if automatic_mode and window_is_active and not window_was_active:
+                    current_mode_index = next_mode_index
+                    next_mode_index = (next_mode_index + 1) % len(VISUAL_MODES)
+                    print(
+                        f"指尖窗口已打开，当前画面效果: "
+                        f"{VISUAL_MODE_LABELS[VISUAL_MODES[current_mode_index]]}"
+                    )
+                window_was_active = window_is_active
+                frame = apply_visual_effect(
+                    frame, clear_polygon, VISUAL_MODES[current_mode_index]
+                )
                 if not args.no_blur:
                     frame = blur_background(frame, hands)
 
@@ -290,6 +375,17 @@ def main():
                         gesture = classify_gesture(landmarks, handedness)
                         draw_result(frame, landmarks, gesture, handedness)
                     draw_two_hand_connections(frame, hands)
+
+                mode_label = VISUAL_MODE_LABELS[VISUAL_MODES[current_mode_index]]
+                cv2.putText(
+                    frame,
+                    f"Mode: {mode_label}   1-6/M: change",
+                    (15, 65),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (255, 255, 255),
+                    2,
+                )
 
                 current_time = time.perf_counter()
                 elapsed = current_time - last_time
@@ -314,6 +410,10 @@ def main():
                     )
                 except cv2.error:
                     window_visible = 0
+                if ord("1") <= key <= ord("6"):
+                    current_mode_index = key - ord("1")
+                elif key in (ord("m"), ord("M")):
+                    current_mode_index = (current_mode_index + 1) % len(VISUAL_MODES)
                 if key in (ord("q"), 27) or window_visible < 1:
                     break
     finally:
